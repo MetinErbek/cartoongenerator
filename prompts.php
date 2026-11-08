@@ -96,24 +96,39 @@ ust_sayfa('prompts.php');
     <?php else: ?>
       <div class="space-y-4">
         <?php foreach ($promptlar as $p): ?>
-          <div class="rounded-2xl border border-stone-800 bg-stone-800/50 p-5">
-            <div class="flex flex-col md:flex-row md:items-center justify-between gap-4 md:gap-6">
-              <div>
-                <div class="font-extrabold text-xl"><?= htmlspecialchars($p['ad']) ?></div>
-                <?php if ($p['sektor'] !== ''): ?>
-                  <span class="inline-block mt-1 text-xs font-bold uppercase px-2 py-1 rounded-lg bg-emerald-500/20 text-emerald-300"><?= htmlspecialchars($p['sektor']) ?></span>
-                <?php endif; ?>
+          <div class="rounded-2xl border border-stone-800 bg-stone-800/50 overflow-hidden">
+            <div class="flex items-center justify-between gap-4 px-5 py-4 cursor-pointer select-none" onclick="promptAcKapat(this)">
+              <div class="flex items-center gap-3 min-w-0">
+                <i class="fa-solid fa-chevron-right chevron transition-transform shrink-0 text-stone-500"></i>
+                <div class="min-w-0">
+                  <div class="font-extrabold text-xl"><?= htmlspecialchars($p['ad']) ?></div>
+                  <?php if ($p['sektor'] !== ''): ?>
+                    <span class="inline-block mt-1 text-xs font-bold uppercase px-2 py-1 rounded-lg bg-emerald-500/20 text-emerald-300"><?= htmlspecialchars($p['sektor']) ?></span>
+                  <?php endif; ?>
+                </div>
               </div>
-              <div class="flex gap-2 shrink-0">
-                <a href="generate.php?prompt_id=<?= (int)$p['id'] ?>" class="btn-main !py-2 !text-lg md:w-auto"><i class="fa-solid fa-wand-magic-sparkles"></i> Kullan</a>
+              <div class="flex gap-2 shrink-0" onclick="event.stopPropagation()">
+                <a href="generate.php?prompt_id=<?= (int)$p['id'] ?>" class="btn-main !py-2 !text-lg"><i class="fa-solid fa-wand-magic-sparkles"></i> Kullan</a>
                 <a href="prompts.php?duzenle=<?= (int)$p['id'] ?>" class="btn-ikincil"><i class="fa-solid fa-pen"></i> Düzenle</a>
                 <a href="prompts.php?sil=<?= (int)$p['id'] ?>" class="btn-tehlike" onclick="return confirm('Bu prompt silinsin mi?')"><i class="fa-solid fa-trash"></i></a>
               </div>
             </div>
-            <div class="mt-4 text-stone-300 text-lg rounded-xl bg-stone-900/70 border border-stone-800 p-4 italic"><?= nl2br(htmlspecialchars($p['metin'])) ?></div>
+            <div class="metin_alan hidden px-5 pb-5">
+              <div class="text-stone-300 text-lg rounded-xl bg-stone-900/70 border border-stone-800 p-4 italic"><?= nl2br(htmlspecialchars($p['metin'])) ?></div>
+            </div>
           </div>
         <?php endforeach; ?>
       </div>
+
+      <script>
+      function promptAcKapat(baslik) {
+        var kart = baslik.parentElement;
+        var alan = kart.querySelector('.metin_alan');
+        var chevron = baslik.querySelector('.chevron');
+        alan.classList.toggle('hidden');
+        chevron.classList.toggle('rotate-90');
+      }
+      </script>
     <?php endif; ?>
   </div>
 </div>

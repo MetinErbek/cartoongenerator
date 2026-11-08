@@ -5,7 +5,18 @@ session_start();
 define('DB_YOL', __DIR__ . '/data/comics.db');
 define('UPLOAD_YOL', __DIR__ . '/uploads');
 define('ISLER_YOL', __DIR__ . '/data/isler'); // arka plan üretim işleri
-define('PAROLA', 'm1'); // tek giriş şifresi
+
+// Şifre, anahtarlar ve adresler env.php dosyasından gelir.
+// env.php yoksa aşağıdaki varsayılan değerler kullanılır.
+if (is_file(__DIR__ . '/env.php')) require __DIR__ . '/env.php';
+
+if (!defined('PAROLA'))          define('PAROLA', 'm1');                    // tek giriş şifresi
+if (!defined('IG_HOST'))         define('IG_HOST', 'graph.instagram.com');  // Instagram Girişi yolu
+if (!defined('IG_SURUM'))        define('IG_SURUM', 'v26.0');               // Graph API sürümü
+if (!defined('IG_APP_ID'))       define('IG_APP_ID', '');
+if (!defined('IG_APP_SECRET'))   define('IG_APP_SECRET', '');
+if (!defined('IG_REDIRECT_URI')) define('IG_REDIRECT_URI', '');
+if (!defined('PUBLIC_BASE_URL')) define('PUBLIC_BASE_URL', '');
 
 if (!is_dir(dirname(DB_YOL))) { mkdir(dirname(DB_YOL), 0777, true); }
 if (!is_dir(UPLOAD_YOL))      { mkdir(UPLOAD_YOL, 0777, true); }
@@ -41,6 +52,12 @@ function kurulum(): void {
         ad TEXT NOT NULL,
         sektor TEXT NOT NULL DEFAULT '',
         metin TEXT NOT NULL
+    )");
+    $pdo->exec("CREATE TABLE IF NOT EXISTS instagram_hesaplar (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        ad TEXT NOT NULL,
+        ig_user_id TEXT NOT NULL,
+        access_token TEXT NOT NULL
     )");
     // İlk kullanımda birkaç örnek prompt taslağı
     $var = (int)$pdo->query("SELECT COUNT(*) FROM promptlar")->fetchColumn();
@@ -279,6 +296,156 @@ function baslik_yaz(string $dosya, string $metin): void {
     file_put_contents(UPLOAD_YOL . '/' . basename($dosya) . '.txt', baslik_temizle($metin));
 }
 
+// ---- Instagram yardımcıları ----
+function instagram_hesaplar(): array {
+    return db()->query("SELECT * FROM instagram_hesaplar ORDER BY ad")->fetchAll();
+}
+
+// ---- Instagram OAuth ("Instagram ile Bağlan") ----
+// Basit HTTP yardımcısı: $veri verilirse POST, verilmezse GET yapar.
+// Dönüş: [true, dizi] | [false, 'hata']
+function ig_http(string $url, ?array $veri = null): array {
+    $ch = curl_init($url);
+    $ayar = [CURLOPT_RETURNTRANSFER => true, CURLOPT_TIMEOUT => 60];
+    if ($veri !== null) {
+        $ayar[CURLOPT_POST] = true;
+        $ayar[CURLOPT_POSTFIELDS] = http_build_query($veri);
+    }
+    curl_setopt_array($ch, $ayar);
+    $yanit = curl_exec($ch);
+    $hata = curl_error($ch);
+    curl_close($ch);
+    if ($yanit === false || $yanit === '') return [false, 'Ağ hatası: ' . $hata];
+    $v = json_decode($yanit, true);
+    if (!is_array($v)) return [false, 'Geçersiz yanıt: ' . substr($yanit, 0, 200)];
+    if (isset($v['error'])) {
+        $mesaj = is_array($v['error']) ? ($v['error']['message'] ?? 'Bilinmeyen hata') : $v['error'];
+        return [false, $mesaj];
+    }
+    return [true, $v];
+}
+
+// Kullanıcının yönlendirileceği yetkilendirme (login) adresi
+function instagram_baglanti_url(string $durum): string {
+    return 'https://www.instagram.com/oauth/authorize?' . http_build_query([
+        'client_id'     => IG_APP_ID,
+        'redirect_uri'  => IG_REDIRECT_URI,
+        'response_type' => 'code',
+        'scope'         => 'instagram_business_basic,instagram_business_content_publish',
+        'state'         => $durum,
+    ]);
+}
+
+// Dönen kodu kısa ömürlü token'a çevirir (token + kullanıcı ID)
+function instagram_kod_degistir(string $kod): array {
+    [$ok, $v] = ig_http('https://api.instagram.com/oauth/access_token', [
+        'client_id'     => IG_APP_ID,
+        'client_secret' => IG_APP_SECRET,
+        'grant_type'    => 'authorization_code',
+        'redirect_uri'  => IG_REDIRECT_URI,
+        'code'          => $kod,
+    ]);
+    if (!$ok) return [false, $v];
+    if (empty($v['access_token'])) return [false, 'Kod değiştirilemedi: ' . substr(json_encode($v), 0, 200)];
+    return [true, ['token' => $v['access_token'], 'user_id' => (string)($v['user_id'] ?? '')]];
+}
+
+// Kısa ömürlü token'ı 60 günlük uzun ömürlü token'a çevirir
+function instagram_uzun_token(string $kisaToken): array {
+    [$ok, $v] = ig_http('https://' . IG_HOST . '/access_token?' . http_build_query([
+        'grant_type'    => 'ig_exchange_token',
+        'client_secret' => IG_APP_SECRET,
+        'access_token'  => $kisaToken,
+    ]));
+    if (!$ok) return [false, $v];
+    return [true, $v['access_token'] ?? $kisaToken];
+}
+
+// Uzun ömürlü token'ı süresi dolmadan yeniler
+function instagram_token_yenile(string $token): array {
+    [$ok, $v] = ig_http('https://' . IG_HOST . '/refresh_access_token?' . http_build_query([
+        'grant_type'   => 'ig_refresh_token',
+        'access_token' => $token,
+    ]));
+    if (!$ok) return [false, $v];
+    return [true, $v['access_token'] ?? $token];
+}
+
+// Token ile profil bilgisi (kullanıcı adı, hesap tipi)
+function instagram_profil(string $token): array {
+    [$ok, $v] = ig_http('https://' . IG_HOST . '/' . IG_SURUM . '/me?' . http_build_query([
+        'fields'       => 'user_id,username,account_type',
+        'access_token' => $token,
+    ]));
+    if (!$ok) return [false, $v];
+    return [true, [
+        'user_id'      => (string)($v['user_id'] ?? $v['id'] ?? ''),
+        'username'     => (string)($v['username'] ?? ''),
+        'account_type' => (string)($v['account_type'] ?? ''),
+    ]];
+}
+
+// Resmin internetten erişilebilir (public) tam adresini üretir
+function resim_public_url(string $dosya): string {
+    $taban = PUBLIC_BASE_URL !== '' ? rtrim(PUBLIC_BASE_URL, '/') : '';
+    if ($taban === '') {
+        $semasi = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') ? 'https' : 'http';
+        $host = $_SERVER['HTTP_HOST'] ?? 'localhost';
+        $yol = rtrim(str_replace('\\', '/', dirname($_SERVER['SCRIPT_NAME'] ?? '/')), '/');
+        if ($yol === '.' || $yol === '') $yol = '';
+        $taban = $semasi . '://' . $host . $yol;
+    }
+    return $taban . '/uploads/' . rawurlencode(basename($dosya));
+}
+
+// Instagram'da resmi yayınlar (Instagram Girişi): 1) konteyner oluştur, 2) yayınla.
+// Dönüş: [true, media_id] | [false, 'hata']
+function instagram_paylas(string $igUserId, string $token, string $gorselUrl, string $caption): array {
+    $temel = 'https://' . IG_HOST . '/' . IG_SURUM . '/' . rawurlencode($igUserId);
+
+    // 1) Konteyner oluştur
+    $ch = curl_init($temel . '/media');
+    curl_setopt_array($ch, [
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_POST => true,
+        CURLOPT_POSTFIELDS => http_build_query([
+            'image_url'    => $gorselUrl,
+            'caption'      => $caption,
+            'access_token' => $token,
+        ]),
+        CURLOPT_TIMEOUT => 120,
+    ]);
+    $yanit = curl_exec($ch);
+    $hata = curl_error($ch);
+    curl_close($ch);
+    if ($yanit === false || $yanit === '') return [false, 'Ağ hatası: ' . $hata];
+    $v = json_decode($yanit, true);
+    if (isset($v['error'])) return [false, $v['error']['message'] ?? 'Instagram hatası'];
+    $olusturId = $v['id'] ?? '';
+    if ($olusturId === '') return [false, 'Konteyner oluşturulamadı: ' . substr($yanit, 0, 200)];
+
+    // 2) Yayınla
+    $ch = curl_init($temel . '/media_publish');
+    curl_setopt_array($ch, [
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_POST => true,
+        CURLOPT_POSTFIELDS => http_build_query([
+            'creation_id'  => $olusturId,
+            'access_token' => $token,
+        ]),
+        CURLOPT_TIMEOUT => 120,
+    ]);
+    $yanit2 = curl_exec($ch);
+    $hata2 = curl_error($ch);
+    curl_close($ch);
+    if ($yanit2 === false || $yanit2 === '') return [false, 'Ağ hatası: ' . $hata2];
+    $v2 = json_decode($yanit2, true);
+    if (isset($v2['error'])) return [false, $v2['error']['message'] ?? 'Instagram yayın hatası'];
+    $medyaId = $v2['id'] ?? '';
+    if ($medyaId === '') return [false, 'Yayınlanamadı: ' . substr($yanit2, 0, 200)];
+    return [true, $medyaId];
+}
+
 function flash_ekle(string $m): void { $_SESSION['flash'][] = $m; }
 function flash_al(): array { $f = $_SESSION['flash'] ?? []; unset($_SESSION['flash']); return $f; }
 
@@ -288,10 +455,11 @@ function sektorler(): array {
 
 function ust_sayfa(string $aktif): void {
     $linkler = [
-        'generate.php'      => ['Üret', 'fa-wand-magic-sparkles'],
-        'eski_resimler.php' => ['Eski Resimler', 'fa-clock-rotate-left'],
-        'models.php'        => ['Modeller', 'fa-robot'],
-        'prompts.php'       => ['Promptlar', 'fa-comment-dots'],
+        'generate.php'      => ['Üret', 'fa-solid fa-wand-magic-sparkles'],
+        'eski_resimler.php' => ['Eski Resimler', 'fa-solid fa-clock-rotate-left'],
+        'models.php'        => ['Modeller', 'fa-solid fa-robot'],
+        'prompts.php'       => ['Promptlar', 'fa-solid fa-comment-dots'],
+        'instagram.php'     => ['Instagram', 'fa-brands fa-instagram'],
     ];
 ?>
 <!DOCTYPE html>
@@ -324,12 +492,12 @@ tailwind.config = { theme: { extend: { fontFamily: { sans: ['Inter', 'sans-serif
       <span class="text-3xl">🎭</span>
       <span class="font-black text-2xl text-amber-400 tracking-tight">Komik Sahne Üretici</span>
     </a>
-    <div class="hidden md:flex items-center gap-2">
+    <div class="hidden md:flex items-center gap-1.5">
       <?php foreach ($linkler as $dosya => $l):
           $aktiflik = $dosya === $aktif ? 'bg-amber-400 text-stone-950' : 'bg-stone-800 text-stone-200 hover:bg-stone-700'; ?>
-          <a href="<?= $dosya ?>" class="<?= $aktiflik ?> rounded-xl px-5 py-3 text-lg font-bold transition"><i class="fa-solid <?= $l[1] ?> mr-2"></i><?= $l[0] ?></a>
+          <a href="<?= $dosya ?>" class="<?= $aktiflik ?> rounded-lg px-3 py-2 text-sm font-bold transition"><i class="<?= $l[1] ?> mr-1.5"></i><?= $l[0] ?></a>
       <?php endforeach; ?>
-      <a href="index.php?cikis=1" title="Çıkış" class="bg-stone-800 text-red-300 hover:bg-red-900/50 rounded-xl px-4 py-3 text-lg font-bold transition"><i class="fa-solid fa-right-from-bracket"></i></a>
+      <a href="index.php?cikis=1" title="Çıkış" class="bg-stone-800 text-red-300 hover:bg-red-900/50 rounded-lg px-3 py-2 text-sm font-bold transition"><i class="fa-solid fa-right-from-bracket"></i></a>
     </div>
   </div>
 </header>
@@ -337,9 +505,9 @@ tailwind.config = { theme: { extend: { fontFamily: { sans: ['Inter', 'sans-serif
 <nav class="fixed bottom-0 inset-x-0 z-40 bg-stone-900/95 backdrop-blur border-t border-stone-800 md:hidden flex justify-around py-2">
   <?php foreach ($linkler as $dosya => $l):
       $aktiflik = $dosya === $aktif ? 'text-amber-400' : 'text-stone-400'; ?>
-      <a href="<?= $dosya ?>" class="<?= $aktiflik ?> flex flex-col items-center py-1 px-6 rounded-xl text-xs font-bold gap-1"><i class="fa-solid <?= $l[1] ?> text-2xl"></i><?= $l[0] ?></a>
+      <a href="<?= $dosya ?>" class="<?= $aktiflik ?> flex flex-col items-center py-1 px-2 rounded-xl text-[10px] font-bold gap-0.5"><i class="<?= $l[1] ?> text-lg"></i><?= $l[0] ?></a>
   <?php endforeach; ?>
-  <a href="index.php?cikis=1" class="flex flex-col items-center py-1 px-6 rounded-xl text-xs font-bold gap-1 text-red-400"><i class="fa-solid fa-right-from-bracket text-2xl"></i>Çıkış</a>
+  <a href="index.php?cikis=1" class="flex flex-col items-center py-1 px-3 rounded-xl text-[10px] font-bold gap-0.5 text-red-400"><i class="fa-solid fa-right-from-bracket text-lg"></i>Çıkış</a>
 </nav>
 
 <main class="max-w-6xl mx-auto px-4 py-6 md:py-10 space-y-8">
@@ -381,6 +549,60 @@ function resimPopup(src) {
     showCloseButton: true,
     background: '#1c1917',
     padding: '1rem'
+  });
+}
+
+// Instagram paylaşım modalı (hesap seç + caption düzenle + paylaş)
+var IG_HESAPLAR = <?= json_encode(instagram_hesaplar(), JSON_UNESCAPED_UNICODE) ?>;
+function paylasModal(dosya, btn) {
+  if (!IG_HESAPLAR.length) {
+    Swal.fire({
+      icon: 'info', title: 'Instagram hesabı yok',
+      html: 'Önce <a href="instagram.php" class="underline font-bold" style="color:#fbbf24">Instagram sayfasından</a> bir hesap ekle.',
+      background: '#1c1917', color: '#f5f5f4', confirmButtonColor: '#fbbf24'
+    });
+    return;
+  }
+  // Caption'ı kartın içindeki textarea'dan al
+  var baslik = '';
+  var kart = btn ? btn.closest('.rounded-2xl') : null;
+  if (kart) { var ta = kart.querySelector('textarea'); if (ta) baslik = ta.value; }
+  var secenekler = IG_HESAPLAR.map(function (h) { return '<option value="' + h.id + '">' + h.ad + '</option>'; }).join('');
+
+  Swal.fire({
+    title: 'Instagram\'da Paylaş',
+    html:
+      '<img src="uploads/' + encodeURIComponent(dosya) + '" class="w-full max-h-40 object-cover rounded-xl mb-4" style="margin:0 auto;display:block">' +
+      '<label class="block text-left text-sm font-bold uppercase mb-1" style="color:#a8a29e">Hesap</label>' +
+      '<select id="ig_hesap" class="swal2-input" style="width:100%;max-width:100%;margin:0">' + secenekler + '</select>' +
+      '<label class="block text-left text-sm font-bold uppercase mt-3 mb-1" style="color:#a8a29e">Caption</label>' +
+      '<textarea id="ig_caption" rows="5" class="swal2-textarea" style="width:100%;max-width:100%;margin:0"></textarea>',
+    showCancelButton: true,
+    confirmButtonText: '<i class="fa-brands fa-instagram"></i> Paylaş',
+    cancelButtonText: 'İptal',
+    background: '#1c1917', color: '#f5f5f4',
+    confirmButtonColor: '#fbbf24', cancelButtonColor: '#44403c',
+    didOpen: function () { document.getElementById('ig_caption').value = baslik; },
+    preConfirm: function () {
+      return { hesap: document.getElementById('ig_hesap').value, caption: document.getElementById('ig_caption').value };
+    }
+  }).then(function (r) {
+    if (!r.isConfirmed) return;
+    Swal.fire({ title: 'Paylaşılıyor...', allowOutsideClick: false, showConfirmButton: false, didOpen: function () { Swal.showLoading(); }, background: '#1c1917', color: '#f5f5f4' });
+    fetch('instagram_paylas.php', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ hesap: r.value.hesap, dosya: dosya, caption: r.value.caption })
+    }).then(function (x) { return x.json(); }).then(function (d) {
+      Swal.fire({
+        icon: d.tamam ? 'success' : 'error',
+        title: d.tamam ? 'Paylaşıldı!' : 'Paylaşılamadı',
+        html: d.tamam ? 'Resim Instagram\'da yayınlandı.' : (d.hata || ''),
+        background: '#1c1917', color: '#f5f5f4', confirmButtonColor: '#fbbf24'
+      });
+    }).catch(function (e) {
+      Swal.fire({ icon: 'error', title: 'Hata', text: e.message, background: '#1c1917', color: '#f5f5f4', confirmButtonColor: '#fbbf24' });
+    });
   });
 }
 </script>

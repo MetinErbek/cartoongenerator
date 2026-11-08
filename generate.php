@@ -86,7 +86,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $dosya = basename($_POST['baslik_resim'] ?? '');
         if (!in_array($dosya, resimler(), true)) { flash_ekle('Geçersiz resim seçildi!'); header('Location: generate.php'); exit; }
         $prompt = trim($_POST['baslik_prompt'] ?? '');
-        if ($prompt === '') $prompt = 'Bu karikatüre kısa, kahkaha attıran bir Türkçe başlık yaz, İngilizce çevirisini parantez içinde ekle ve bolca etiket (hashtag) koy.';
+        if ($prompt === '') $prompt = 'Bu karikatüre kısa, kahkaha attıran bir İngilizce başlık yaz ve bolca etiket (hashtag) koy, etiketler global ve ilgi çekici olmalı.';
         // Modelin "Başlık:", "İşte..." gibi açıklama/konuşma ekleri yazmasını engelle; Türkçe+İngilizce başlık ve bol etiket iste
         $prompt = 'Görevin: ' . $prompt . ' Cevabında SADECE başlık metnini ver; "başlık", "işte", "captıon" gibi kelimeler, açıklama, emoji veya iki nokta üst üste kullanma. Tek kısa Türkçe cümle yaz, hemen yanına parantez içinde İngilizce çevirisini ekle ve cümlenin sonuna bolca (5-10 tane) konuyla ilgili etiket (hashtag) ekle. Örnek: "Karpuzu gol sanan futbolcu! (The footballer mistook a watermelon for a goal!) #komik #futbol #gol #spor"';
 
@@ -106,6 +106,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             }
         }
 
+        
         set_time_limit(0);
         session_write_close(); // oturum kilidini bırak; uzun istek sürerken diğer sekmeler takılmasın
         [$ok, $sonuc] = openrouter_iste($model['model_id'], $prompt, $api, $gorselVeri);
@@ -228,9 +229,10 @@ ust_sayfa('generate.php');
         <div class="rounded-2xl overflow-hidden border border-stone-800 bg-stone-800/40 flex flex-col">
           <img src="uploads/<?= htmlspecialchars(rawurlencode($dosya)) ?>" alt="<?= htmlspecialchars($dosya) ?>" onclick="resimPopup(this.src)" class="w-full h-64 object-cover cursor-zoom-in hover:opacity-90 transition">
           <div class="p-4 flex-1 flex flex-col gap-2">
-            <div class="flex items-center gap-2">
+            <div class="flex flex-wrap items-center gap-2">
               <div class="text-xs text-stone-500 break-all flex-1"><?= htmlspecialchars($dosya) ?></div>
               <a href="uploads/<?= htmlspecialchars(rawurlencode($dosya)) ?>" download class="btn-ikincil !px-3 !py-2 !text-sm shrink-0"><i class="fa-solid fa-download"></i> İndir</a>
+              <button type="button" onclick='paylasModal(<?= json_encode($dosya, JSON_UNESCAPED_UNICODE) ?>, this)' class="btn-ikincil !px-3 !py-2 !text-sm shrink-0"><i class="fa-brands fa-instagram"></i> Paylaş</button>
             </div>
             <?php if ($baslik !== ''): ?>
               <div class="flex flex-col gap-2">
